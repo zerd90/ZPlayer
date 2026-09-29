@@ -7,7 +7,7 @@
 
 namespace zplayer {
 
-/** ImGui shell: video area + status text. Does not own decode/present lifetime. */
+/** ImGui shell: video area + status + transport chrome. Does not own decode/present. */
 class PlayerView {
 public:
     void setPlayer(MediaPlayer *player) { player_ = player; }
@@ -19,6 +19,8 @@ public:
     void setStatus(const std::string &status) { status_ = status; }
 
 private:
+    void drawProgressBar(float barWidth, double mediaTime, double duration);
+
     MediaPlayer *player_ = nullptr;
     VideoPresent *present_ = nullptr;
     VideoFrame lastFrame_;
