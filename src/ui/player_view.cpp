@@ -114,14 +114,14 @@ void PlayerView::drawTransportControls()
 
 double PlayerView::drawProgressBar(float barWidth, double mediaTime, double duration)
 {
-    const float barH = 10.0f;
+    const float barH = 8.0f;
     const float trackR = 3.0f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const ImVec2 cursor = ImGui::GetCursorScreenPos();
     const ImVec2 trackMin = cursor;
     const ImVec2 trackMax = ImVec2(cursor.x + barWidth, cursor.y + barH);
 
-    ImGui::InvisibleButton("##progress", ImVec2(barWidth, barH + 8.0f));
+    ImGui::InvisibleButton("##progress", ImVec2(barWidth, barH + 6.0f));
     const bool active = ImGui::IsItemActive();
     const bool hovered = ImGui::IsItemHovered();
 
@@ -142,15 +142,20 @@ double PlayerView::drawProgressBar(float barWidth, double mediaTime, double dura
         scrubbing_ = false;
     }
 
-    const ImU32 colTrack = IM_COL32(255, 255, 255, 40);
-    const ImU32 colFill = hovered || scrubbing_ ? IM_COL32(245, 245, 250, 235) : IM_COL32(230, 230, 235, 220);
-    const ImU32 colKnob = IM_COL32(255, 255, 255, 255);
+    // Light-chrome contrast: dark fill/knob on a clearly visible gray track.
+    const ImU32 colTrack = IM_COL32(148, 148, 154, 255);
+    const ImU32 colFill = hovered || scrubbing_ ? IM_COL32(36, 36, 42, 255) : IM_COL32(52, 52, 60, 255);
+    const ImU32 colKnob = IM_COL32(28, 28, 34, 255);
+    const ImU32 colKnobRim = IM_COL32(255, 255, 255, 240);
 
     dl->AddRectFilled(trackMin, trackMax, colTrack, trackR);
     if (ratio > 0.f) {
         const float fillW = std::max(barH * 0.5f, barWidth * ratio);
         dl->AddRectFilled(trackMin, ImVec2(trackMin.x + fillW, trackMax.y), colFill, trackR);
-        dl->AddCircleFilled(ImVec2(trackMin.x + fillW, trackMin.y + barH * 0.5f), scrubbing_ ? 7.0f : 5.0f, colKnob);
+        const float knobR = scrubbing_ ? 6.5f : 5.0f;
+        const ImVec2 knobC(trackMin.x + fillW, trackMin.y + barH * 0.5f);
+        dl->AddCircleFilled(knobC, knobR + 1.5f, colKnobRim);
+        dl->AddCircleFilled(knobC, knobR, colKnob);
     }
 
     const double displayTime = scrubbing_ && duration > 0.05 ? static_cast<double>(scrubRatio_) * duration : mediaTime;
@@ -162,7 +167,7 @@ double PlayerView::drawProgressBar(float barWidth, double mediaTime, double dura
     else
         std::snprintf(durBuf, sizeof(durBuf), "--:--");
 
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.15f, 0.15f, 0.18f, 1.f));
     ImGui::Text("%s / %s%s", curBuf, durBuf, scrubbing_ ? "  (预览)" : "");
     ImGui::PopStyleColor();
 
@@ -178,8 +183,22 @@ void PlayerView::draw()
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
     ImGui::Begin("##ZPlayerVideo", nullptr, flags);
 
-    const float chromeH = 110.0f;
-    const float pad = 14.0f;
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float pad = 12.0f;
+    const float btnH = 40.0f;
+    const float chromeGapY = 2.0f; // Dummy heights inside chrome
+    const float chromeBottom = 14.0f;
+    // Match PushStyleVar ItemSpacing.y used in the chrome block below.
+    const float chromeItemGap = 2.0f;
+    const float textH = ImGui::GetTextLineHeight();
+    // progress hit (barH+6=14) + time line; keep in sync with drawProgressBar.
+    const float progressBlockH = 14.0f + chromeItemGap + textH;
+    const float statusBlockH = status_.empty() ? 0.f : (chromeItemGap + textH);
+    // Include ItemSpacing between chrome widgets (child→dummy→progress→dummy→btns→status→pad).
+    const float chromeSpacings = chromeItemGap * 6.0f;
+    const float chromeH =
+        chromeGapY + progressBlockH + chromeGapY + btnH + statusBlockH + chromeBottom + chromeSpacings;
+
     const float availW = ImGui::GetContentRegionAvail().x;
     const float availH = ImGui::GetContentRegionAvail().y;
     const float videoAreaH = std::max(80.f, availH - chromeH);
@@ -191,6 +210,8 @@ void PlayerView::draw()
         const double clockT = player_->mediaTimeSec();
         const double duration = player_->durationSec();
 
+        // Tighten spacing between video child and chrome.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, chromeItemGap));
         ImGui::BeginChild("##video", ImVec2(availW, videoAreaH), false,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -214,8 +235,9 @@ void PlayerView::draw()
                 drawW = vw * scale;
                 drawH = vh * scale;
             }
+            // Bottom-align so letterboxing sits above the frame, not as a fake gap before chrome.
             const ImVec2 cursor = ImGui::GetCursorPos();
-            ImGui::SetCursorPos(ImVec2(cursor.x + (regionW - drawW) * 0.5f, cursor.y + (regionH - drawH) * 0.5f));
+            ImGui::SetCursorPos(ImVec2(cursor.x + (regionW - drawW) * 0.5f, cursor.y + (regionH - drawH)));
             ImGui::Image(present_->textureId(), ImVec2(drawW, drawH));
         } else {
             ImGui::TextUnformatted(status_.c_str());
@@ -224,21 +246,23 @@ void PlayerView::draw()
         }
         ImGui::EndChild();
 
-        // Bottom chrome: progress + transport (always reserved via videoAreaH).
-        ImGui::Dummy(ImVec2(0, 6));
+        // Bottom chrome: progress + transport + status (height reserved via chromeH).
+        ImGui::Dummy(ImVec2(0, chromeGapY));
         ImGui::Indent(pad);
         drawProgressBar(std::max(0.f, availW - pad * 2.f), clockT, duration);
-        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::Dummy(ImVec2(0, chromeGapY));
         drawTransportControls();
         ImGui::Unindent(pad);
 
         if (!status_.empty()) {
             ImGui::Indent(pad);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.55f, 0.58f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.22f, 0.24f, 1.f));
             ImGui::TextUnformatted(status_.c_str());
             ImGui::PopStyleColor();
             ImGui::Unindent(pad);
         }
+        ImGui::Dummy(ImVec2(0, chromeBottom));
+        ImGui::PopStyleVar();
     } else {
         scrubbing_ = false;
         ImGui::TextUnformatted(status_.c_str());
