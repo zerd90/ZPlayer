@@ -1,3 +1,6 @@
 [submodule "submodules/imgui"]
 	path = submodules/imgui
 	url = https://github.com/zerd90/imgui_base.git
+[submodule "submodules/miniaudio"]
+	path = submodules/miniaudio
+	url = https://github.com/mackron/miniaudio.git
