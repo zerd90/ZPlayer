@@ -48,6 +48,8 @@ ZPlayerMainWindow::~ZPlayerMainWindow()
 void ZPlayerMainWindow::presetInternal()
 {
     mApplicationName = "ZPlayer";
+    mWindowRect = {120, 80, 960, 640};
+    mWindowSizeMin = ImVec2(480, 360);
 }
 
 void ZPlayerMainWindow::openPath(const std::string &path)

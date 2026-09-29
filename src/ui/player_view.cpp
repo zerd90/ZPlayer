@@ -30,9 +30,10 @@ bool transportIconButton(const char *id, float size)
     const bool active = ImGui::IsItemActive();
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    const ImU32 bg = active    ? IM_COL32(255, 255, 255, 55)
-                     : hovered ? IM_COL32(255, 255, 255, 35)
-                               : IM_COL32(255, 255, 255, 18);
+    // Contrast for both light and dark imgui themes.
+    const ImU32 bg = active    ? IM_COL32(40, 40, 48, 200)
+                     : hovered ? IM_COL32(50, 50, 58, 170)
+                               : IM_COL32(60, 60, 68, 140);
     dl->AddCircleFilled(ImVec2(pos.x + size * 0.5f, pos.y + size * 0.5f), size * 0.5f, bg);
     return pressed;
 }
@@ -83,13 +84,13 @@ void PlayerView::drawTransportControls()
     if (!player_)
         return;
 
-    const float btn = 36.0f;
-    const float gap = 14.0f;
+    const float btn = 40.0f;
+    const float gap = 18.0f;
     const float rowW = btn * 3.f + gap * 2.f;
     const float avail = ImGui::GetContentRegionAvail().x;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (avail - rowW) * 0.5f));
 
-    const ImU32 iconCol = IM_COL32(240, 240, 245, 255);
+    const ImU32 iconCol = IM_COL32(250, 250, 252, 255);
     ImVec2 p = ImGui::GetCursorScreenPos();
     if (transportIconButton("##rew", btn))
         player_->skip(-MediaPlayer::kSkipStepSec);
@@ -134,7 +135,6 @@ double PlayerView::drawProgressBar(float barWidth, double mediaTime, double dura
         scrubbing_ = true;
         ratio = scrubRatio_;
     } else if (scrubbing_ && !active) {
-        // Mouse released → commit seek.
         if (player_ && duration > 0.05)
             player_->seek(static_cast<double>(scrubRatio_) * duration);
         scrubbing_ = false;
@@ -178,11 +178,11 @@ void PlayerView::draw()
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
     ImGui::Begin("##ZPlayerVideo", nullptr, flags);
 
-    const float chromeH = 96.0f;
-    const float pad = 12.0f;
+    const float chromeH = 110.0f;
+    const float pad = 14.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
     const float availH = ImGui::GetContentRegionAvail().y;
-    const float videoAreaH = std::max(0.f, availH - chromeH - pad);
+    const float videoAreaH = std::max(80.f, availH - chromeH);
 
     if (player_ && player_->isOpen() && present_) {
         if (!player_->isPaused())
@@ -191,11 +191,9 @@ void PlayerView::draw()
         const double clockT = player_->mediaTimeSec();
         const double duration = player_->durationSec();
 
-        // Draw chrome first conceptually via layout: video then bar.
         ImGui::BeginChild("##video", ImVec2(availW, videoAreaH), false,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-        // While scrubbing, freeze present clock to preview ratio (seek commits on release).
         const double presentT = scrubbing_ && duration > 0.05 ? static_cast<double>(scrubRatio_) * duration : clockT;
         VideoFrame frame;
         if (player_->takeFrameForTime(presentT, frame)) {
@@ -226,10 +224,11 @@ void PlayerView::draw()
         }
         ImGui::EndChild();
 
-        ImGui::Dummy(ImVec2(0, 4));
+        // Bottom chrome: progress + transport (always reserved via videoAreaH).
+        ImGui::Dummy(ImVec2(0, 6));
         ImGui::Indent(pad);
         drawProgressBar(std::max(0.f, availW - pad * 2.f), clockT, duration);
-        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::Dummy(ImVec2(0, 8));
         drawTransportControls();
         ImGui::Unindent(pad);
 
