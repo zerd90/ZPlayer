@@ -104,10 +104,16 @@ if(APPLE)
     find_library(ZPLAYER_ICONV_LIB iconv REQUIRED)
     find_library(ZPLAYER_BZ2_LIB bz2 REQUIRED)
     find_library(ZPLAYER_Z_LIB z REQUIRED)
+    # Autodetect may enable VideoToolbox hwaccel/encoder objects in libavcodec.
     target_link_libraries(ffmpeg INTERFACE
         "${ZPLAYER_ICONV_LIB}"
         "${ZPLAYER_BZ2_LIB}"
         "${ZPLAYER_Z_LIB}"
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework CoreFoundation"
+        "-framework Security"
     )
 elseif(WIN32)
     # Shared DLLs live next to import libs; ensure the exe can find them at runtime
@@ -116,14 +122,17 @@ elseif(WIN32)
     target_link_libraries(ffmpeg INTERFACE ws2_32 secur32 bcrypt)
 endif()
 
-aux_source_directory(src SRC_FILES)
-# ffmpeg_link_probe.c lives under src/media/ (aux_source_directory is non-recursive).
-imgui_add_executable(${PROJECT_NAME}
-    ${SRC_FILES}
+set(ZPLAYER_SOURCES
     MainWindow.cpp
-    src/media/ffmpeg_link_probe.c
+    src/media/audio_output.cpp
+    src/media/media_player.cpp
+    src/present/video_present.cpp
+    src/ui/player_view.cpp
 )
 
+imgui_add_executable(${PROJECT_NAME} ${ZPLAYER_SOURCES})
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(${PROJECT_NAME} PRIVATE imgui miniaudio ffmpeg)
 
 if(WIN32)
@@ -142,3 +151,16 @@ if(WIN32)
 endif()
 
 install(TARGETS ${PROJECT_NAME} DESTINATION ${CMAKE_SOURCE_DIR}/bin)
+
+# Headless decode smoke (no GUI) for CI / local verify.
+add_executable(ZPlayerDecodeSmoke
+    tools/decode_smoke.cpp
+    src/media/audio_output.cpp
+    src/media/media_player.cpp
+)
+target_include_directories(ZPlayerDecodeSmoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ZPlayerDecodeSmoke PRIVATE miniaudio ffmpeg)
+if(APPLE)
+    # std::thread
+endif()
+
