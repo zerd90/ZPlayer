@@ -88,7 +88,6 @@ bool findHwPixelFormat(const AVCodec *dec, AVHWDeviceType type, AVPixelFormat *o
     return false;
 }
 
-/** Try hardware path; on any failure leave ctx ready for soft open (caller opens). */
 bool tryInitHardware(AVCodecContext *ctx, const AVCodec *dec, HwDecodeState *hw, std::string *deviceName)
 {
     const AVHWDeviceType type = preferredHwDeviceType();
@@ -138,7 +137,6 @@ void clearHardware(AVCodecContext *ctx, HwDecodeState *hw)
 
 bool frameToRgba(AVFrame *src, AVFrame *rgbaFrame, SwsContext **sws, VideoFrame &out, AVRational videoTb)
 {
-    // Hardware surfaces must be transferred to a software frame first.
     AVFrame *swFrame = nullptr;
     AVFrame *use = src;
     bool transferred = false;
@@ -211,6 +209,20 @@ void MediaPlayer::clearQueues()
     videoCv_.notify_all();
 }
 
+void MediaPlayer::setMediaClockSec(double sec)
+{
+    std::lock_guard<std::mutex> lock(clockMutex_);
+    if (sec < 0.0)
+        sec = 0.0;
+    const double dur = durationSec_.load();
+    if (dur > 0.0 && sec > dur)
+        sec = dur;
+    mediaBaseSec_ = sec;
+    clockAnchorUs_ = steadyUsNow();
+    pausedAtSec_ = sec;
+    clockStarted_ = true;
+}
+
 bool MediaPlayer::open(const std::string &path)
 {
     close();
@@ -224,10 +236,20 @@ bool MediaPlayer::open(const std::string &path)
     videoWidth_ = 0;
     videoHeight_ = 0;
     durationSec_ = 0.0;
+    paused_ = false;
+    decodeOneAfterSeek_ = false;
+    discardBeforeSec_ = -1.0;
+    {
+        std::lock_guard<std::mutex> lock(seekMutex_);
+        seekTargetSec_ = 0.0;
+    }
+    seekPending_ = false;
     {
         std::lock_guard<std::mutex> lock(clockMutex_);
         clockStarted_ = false;
-        clockStartUs_ = 0;
+        clockAnchorUs_ = 0;
+        mediaBaseSec_ = 0.0;
+        pausedAtSec_ = 0.0;
     }
     clearQueues();
 
@@ -253,10 +275,20 @@ void MediaPlayer::close()
     hasVideo_ = false;
     usingHw_ = false;
     hwDeviceName_.clear();
+    paused_ = false;
+    decodeOneAfterSeek_ = false;
+    discardBeforeSec_ = -1.0;
+    seekPending_ = false;
+    {
+        std::lock_guard<std::mutex> lock(seekMutex_);
+        seekTargetSec_ = 0.0;
+    }
     {
         std::lock_guard<std::mutex> lock(clockMutex_);
         clockStarted_ = false;
-        clockStartUs_ = 0;
+        clockAnchorUs_ = 0;
+        mediaBaseSec_ = 0.0;
+        pausedAtSec_ = 0.0;
     }
 }
 
@@ -272,8 +304,10 @@ void MediaPlayer::startClockIfNeeded()
         std::lock_guard<std::mutex> lock(clockMutex_);
         if (!clockStarted_) {
             clockStarted_ = true;
-            clockStartUs_ = steadyUsNow();
-            shouldStartAudio = hasAudio_.load();
+            clockAnchorUs_ = steadyUsNow();
+            mediaBaseSec_ = 0.0;
+            pausedAtSec_ = 0.0;
+            shouldStartAudio = hasAudio_.load() && !paused_.load();
         }
     }
     if (shouldStartAudio)
@@ -285,7 +319,69 @@ double MediaPlayer::mediaTimeSec() const
     std::lock_guard<std::mutex> lock(clockMutex_);
     if (!clockStarted_)
         return 0.0;
-    return (steadyUsNow() - clockStartUs_) / 1'000'000.0;
+    if (paused_.load())
+        return pausedAtSec_;
+    return mediaBaseSec_ + (steadyUsNow() - clockAnchorUs_) / 1'000'000.0;
+}
+
+void MediaPlayer::setPaused(bool paused)
+{
+    if (!open_.load())
+        return;
+    if (paused == paused_.load())
+        return;
+
+    if (paused) {
+        double t = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(clockMutex_);
+            if (clockStarted_)
+                t = mediaBaseSec_ + (steadyUsNow() - clockAnchorUs_) / 1'000'000.0;
+            pausedAtSec_ = t;
+            paused_ = true;
+        }
+        audio_.setPaused(true);
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(clockMutex_);
+            mediaBaseSec_ = pausedAtSec_;
+            clockAnchorUs_ = steadyUsNow();
+            clockStarted_ = true;
+            paused_ = false;
+        }
+        if (hasAudio_.load()) {
+            audio_.startDevice();
+            audio_.setPaused(false);
+        }
+    }
+}
+
+void MediaPlayer::seek(double sec)
+{
+    if (!open_.load())
+        return;
+    if (sec < 0.0)
+        sec = 0.0;
+    const double dur = durationSec_.load();
+    if (dur > 0.0 && sec > dur)
+        sec = dur;
+
+    {
+        std::lock_guard<std::mutex> lock(seekMutex_);
+        seekTargetSec_ = sec;
+    }
+    seekPending_ = true;
+    decodeOneAfterSeek_ = true;
+    discardBeforeSec_ = sec;
+    setMediaClockSec(sec);
+    clearQueues();
+    audio_.clearBuffer();
+    videoCv_.notify_all();
+}
+
+void MediaPlayer::skip(double deltaSec)
+{
+    seek(mediaTimeSec() + deltaSec);
 }
 
 bool MediaPlayer::takeFrameForTime(double mediaTimeSec, VideoFrame &out)
@@ -325,11 +421,35 @@ void MediaPlayer::decodeLoop()
     AVChannelLayout outLayout{};
     int outSampleRate = 48000;
     const int outChannels = 2;
+    bool eof = false;
 
     auto fail = [&](const char *msg) {
         std::fprintf(stderr, "[ZPlayer] %s\n", msg);
         stop_ = true;
         open_ = false;
+    };
+
+    auto applySeek = [&](double targetSec) {
+        if (!fmt)
+            return;
+        const int64_t ts = static_cast<int64_t>(targetSec * AV_TIME_BASE);
+        int flags = AVSEEK_FLAG_BACKWARD;
+        if (av_seek_frame(fmt, -1, ts, flags) < 0) {
+            // Fallback: stream-relative seek on video.
+            if (videoStream >= 0) {
+                AVStream *st = fmt->streams[videoStream];
+                const int64_t vts = static_cast<int64_t>(targetSec / av_q2d(st->time_base));
+                av_seek_frame(fmt, videoStream, vts, AVSEEK_FLAG_BACKWARD);
+            }
+        }
+        if (videoCtx)
+            avcodec_flush_buffers(videoCtx);
+        if (audioCtx)
+            avcodec_flush_buffers(audioCtx);
+        clearQueues();
+        audio_.clearBuffer();
+        eof = false;
+        std::fprintf(stderr, "[ZPlayer] seek -> %.3fs\n", targetSec);
     };
 
     if (avformat_open_input(&fmt, path_.c_str(), nullptr, nullptr) < 0) {
@@ -367,7 +487,6 @@ void MediaPlayer::decodeLoop()
                 clearHardware(videoCtx, &hw);
                 hw = {};
                 hwDeviceName_.clear();
-                // Re-apply codecpar after clearing hw fields.
                 avcodec_free_context(&videoCtx);
                 videoCtx = avcodec_alloc_context3(dec);
                 if (!videoCtx || avcodec_parameters_to_context(videoCtx, st->codecpar) < 0 ||
@@ -452,9 +571,71 @@ void MediaPlayer::decodeLoop()
                  decodeBackendName().c_str(), durationSec_.load());
 
     while (!stop_.load()) {
+        // Consume seek requests.
+        {
+            double target = 0.0;
+            bool doSeek = false;
+            if (seekPending_.exchange(false)) {
+                std::lock_guard<std::mutex> lock(seekMutex_);
+                target = seekTargetSec_;
+                doSeek = true;
+            }
+            if (doSeek)
+                applySeek(target);
+        }
+
+        // While paused, idle unless we need a post-seek preview frame.
+        if (paused_.load() && !decodeOneAfterSeek_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        if (eof) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
         int ret = av_read_frame(fmt, pkt);
-        if (ret < 0)
-            break;
+        if (ret < 0) {
+            eof = true;
+            // Flush video decoder once at EOF.
+            if (videoCtx) {
+                avcodec_send_packet(videoCtx, nullptr);
+                while (!stop_.load()) {
+                    ret = avcodec_receive_frame(videoCtx, frame);
+                    if (ret < 0)
+                        break;
+                    if (frame->width > 0 && frame->height > 0 &&
+                        (rgbaFrame->width != frame->width || rgbaFrame->height != frame->height)) {
+                        av_frame_unref(rgbaFrame);
+                        rgbaFrame->format = AV_PIX_FMT_RGBA;
+                        rgbaFrame->width = frame->width;
+                        rgbaFrame->height = frame->height;
+                        if (av_frame_get_buffer(rgbaFrame, 32) < 0) {
+                            av_frame_unref(frame);
+                            break;
+                        }
+                        videoWidth_ = frame->width;
+                        videoHeight_ = frame->height;
+                    }
+                    VideoFrame vf;
+                    if (frameToRgba(frame, rgbaFrame, &sws, vf, videoTb)) {
+                        const double discardBefore = discardBeforeSec_.load();
+                        if (!(discardBefore >= 0.0 && vf.ptsSec + 0.08 < discardBefore)) {
+                            std::unique_lock<std::mutex> lock(videoMutex_);
+                            videoCv_.wait(lock, [&] { return stop_.load() || videoQueue_.size() < kMaxVideoQueue; });
+                            if (!stop_.load()) {
+                                videoQueue_.push_back(std::move(vf));
+                                if (discardBefore >= 0.0)
+                                    discardBeforeSec_ = -1.0;
+                            }
+                        }
+                    }
+                    av_frame_unref(frame);
+                }
+            }
+            continue;
+        }
 
         if (pkt->stream_index == videoStream && videoCtx) {
             if (avcodec_send_packet(videoCtx, pkt) < 0) {
@@ -462,13 +643,18 @@ void MediaPlayer::decodeLoop()
                 continue;
             }
             while (!stop_.load()) {
+                // Allow interrupting a full queue wait for seek/stop.
+                if (seekPending_.load()) {
+                    av_frame_unref(frame);
+                    break;
+                }
+
                 ret = avcodec_receive_frame(videoCtx, frame);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
                     break;
                 if (ret < 0)
                     break;
 
-                // Late size discovery after first hw frame.
                 if (frame->width > 0 && frame->height > 0 &&
                     (rgbaFrame->width != frame->width || rgbaFrame->height != frame->height)) {
                     av_frame_unref(rgbaFrame);
@@ -489,16 +675,29 @@ void MediaPlayer::decodeLoop()
                     continue;
                 }
 
+                const double discardBefore = discardBeforeSec_.load();
+                if (discardBefore >= 0.0 && vf.ptsSec + 0.08 < discardBefore) {
+                    av_frame_unref(frame);
+                    continue;
+                }
+
                 {
                     std::unique_lock<std::mutex> lock(videoMutex_);
-                    videoCv_.wait(lock, [&] { return stop_.load() || videoQueue_.size() < kMaxVideoQueue; });
-                    if (stop_.load()) {
+                    videoCv_.wait(lock, [&] {
+                        return stop_.load() || seekPending_.load() || videoQueue_.size() < kMaxVideoQueue;
+                    });
+                    if (stop_.load() || seekPending_.load()) {
                         av_frame_unref(frame);
                         break;
                     }
                     videoQueue_.push_back(std::move(vf));
+                    if (discardBefore >= 0.0)
+                        discardBeforeSec_ = -1.0;
+                    if (decodeOneAfterSeek_.load() && !videoQueue_.empty())
+                        decodeOneAfterSeek_ = false;
                 }
-                startClockIfNeeded();
+                if (!paused_.load())
+                    startClockIfNeeded();
                 av_frame_unref(frame);
             }
         } else if (pkt->stream_index == audioStream && audioCtx && swr && hasAudio_.load()) {
@@ -514,33 +713,17 @@ void MediaPlayer::decodeLoop()
                     break;
 
                 const int outSamples = swr_get_out_samples(swr, frame->nb_samples);
-                std::vector<float> interleaved(static_cast<size_t>(std::max(outSamples, 1)) * static_cast<size_t>(outChannels));
+                std::vector<float> interleaved(static_cast<size_t>(std::max(outSamples, 1)) *
+                                               static_cast<size_t>(outChannels));
                 uint8_t *outPlanes[1] = {reinterpret_cast<uint8_t *>(interleaved.data())};
                 const int converted =
                     swr_convert(swr, outPlanes, outSamples, (const uint8_t **)frame->extended_data, frame->nb_samples);
-                if (converted > 0)
+                if (converted > 0 && !paused_.load())
                     audio_.write(interleaved.data(), static_cast<size_t>(converted));
                 av_frame_unref(frame);
             }
         }
         av_packet_unref(pkt);
-    }
-
-    if (videoCtx && !stop_.load()) {
-        avcodec_send_packet(videoCtx, nullptr);
-        while (!stop_.load()) {
-            int ret = avcodec_receive_frame(videoCtx, frame);
-            if (ret < 0)
-                break;
-            VideoFrame vf;
-            if (frameToRgba(frame, rgbaFrame, &sws, vf, videoTb)) {
-                std::unique_lock<std::mutex> lock(videoMutex_);
-                videoCv_.wait(lock, [&] { return stop_.load() || videoQueue_.size() < kMaxVideoQueue; });
-                if (!stop_.load())
-                    videoQueue_.push_back(std::move(vf));
-            }
-            av_frame_unref(frame);
-        }
     }
 
     std::fprintf(stderr, "[ZPlayer] decode thread finished\n");

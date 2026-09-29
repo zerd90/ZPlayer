@@ -22,15 +22,12 @@ void formatTime(char *buf, size_t n, double sec)
         std::snprintf(buf, n, "%d:%02d", m, s);
 }
 
-/** Hit-tested icon button drawn with ImDrawList geometry (no text glyph buttons). */
-bool transportIconButton(const char *id, float size, bool *hoveredOut = nullptr)
+bool transportIconButton(const char *id, float size)
 {
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
     const bool hovered = ImGui::IsItemHovered();
     const bool active = ImGui::IsItemActive();
-    if (hoveredOut)
-        *hoveredOut = hovered;
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const ImU32 bg = active    ? IM_COL32(255, 255, 255, 55)
@@ -43,7 +40,6 @@ bool transportIconButton(const char *id, float size, bool *hoveredOut = nullptr)
 void drawSkipBackIcon(ImVec2 c, float r, ImU32 col)
 {
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    // Double chevron left + bar.
     const float x0 = c.x - r * 0.55f;
     const float y0 = c.y - r * 0.45f;
     const float y1 = c.y + r * 0.45f;
@@ -82,23 +78,11 @@ void drawPauseIcon(ImVec2 c, float r, ImU32 col)
 
 } // namespace
 
-void PlayerView::onTogglePauseStub()
-{
-    uiPaused_ = !uiPaused_;
-}
-
-void PlayerView::onSkipBackStub()
-{
-    // Step 3: visual stub only; seek wired in step 4.
-}
-
-void PlayerView::onSkipForwardStub()
-{
-    // Step 3: visual stub only; seek wired in step 4.
-}
-
 void PlayerView::drawTransportControls()
 {
+    if (!player_)
+        return;
+
     const float btn = 36.0f;
     const float gap = 14.0f;
     const float rowW = btn * 3.f + gap * 2.f;
@@ -108,14 +92,14 @@ void PlayerView::drawTransportControls()
     const ImU32 iconCol = IM_COL32(240, 240, 245, 255);
     ImVec2 p = ImGui::GetCursorScreenPos();
     if (transportIconButton("##rew", btn))
-        onSkipBackStub();
+        player_->skip(-MediaPlayer::kSkipStepSec);
     drawSkipBackIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
 
     ImGui::SameLine(0, gap);
     p = ImGui::GetCursorScreenPos();
     if (transportIconButton("##playpause", btn))
-        onTogglePauseStub();
-    if (uiPaused_)
+        player_->togglePause();
+    if (player_->isPaused())
         drawPlayIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
     else
         drawPauseIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
@@ -123,47 +107,66 @@ void PlayerView::drawTransportControls()
     ImGui::SameLine(0, gap);
     p = ImGui::GetCursorScreenPos();
     if (transportIconButton("##ff", btn))
-        onSkipForwardStub();
+        player_->skip(MediaPlayer::kSkipStepSec);
     drawSkipForwardIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
 }
 
-void PlayerView::drawProgressBar(float barWidth, double mediaTime, double duration)
+double PlayerView::drawProgressBar(float barWidth, double mediaTime, double duration)
 {
-    const float barH = 6.0f;
+    const float barH = 10.0f;
     const float trackR = 3.0f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const ImVec2 cursor = ImGui::GetCursorScreenPos();
     const ImVec2 trackMin = cursor;
     const ImVec2 trackMax = ImVec2(cursor.x + barWidth, cursor.y + barH);
 
-    const ImU32 colTrack = IM_COL32(255, 255, 255, 40);
-    const ImU32 colFill = IM_COL32(230, 230, 235, 220);
-    const ImU32 colKnob = IM_COL32(255, 255, 255, 255);
-
-    dl->AddRectFilled(trackMin, trackMax, colTrack, trackR);
+    ImGui::InvisibleButton("##progress", ImVec2(barWidth, barH + 8.0f));
+    const bool active = ImGui::IsItemActive();
+    const bool hovered = ImGui::IsItemHovered();
 
     float ratio = 0.f;
     if (duration > 0.05)
         ratio = static_cast<float>(std::clamp(mediaTime / duration, 0.0, 1.0));
-    if (ratio > 0.f) {
-        const float fillW = std::max(barH, barWidth * ratio);
-        dl->AddRectFilled(trackMin, ImVec2(trackMin.x + fillW, trackMax.y), colFill, trackR);
-        const float knobX = trackMin.x + fillW;
-        dl->AddCircleFilled(ImVec2(knobX, trackMin.y + barH * 0.5f), 5.0f, colKnob);
+
+    if (active && duration > 0.05) {
+        const float mouseX = ImGui::GetIO().MousePos.x;
+        scrubRatio_ = std::clamp((mouseX - trackMin.x) / barWidth, 0.f, 1.f);
+        scrubbing_ = true;
+        ratio = scrubRatio_;
+    } else if (scrubbing_ && !active) {
+        // Mouse released → commit seek.
+        if (player_ && duration > 0.05)
+            player_->seek(static_cast<double>(scrubRatio_) * duration);
+        scrubbing_ = false;
+    } else if (!active) {
+        scrubbing_ = false;
     }
 
-    ImGui::InvisibleButton("##progress", ImVec2(barWidth, barH + 4.0f));
+    const ImU32 colTrack = IM_COL32(255, 255, 255, 40);
+    const ImU32 colFill = hovered || scrubbing_ ? IM_COL32(245, 245, 250, 235) : IM_COL32(230, 230, 235, 220);
+    const ImU32 colKnob = IM_COL32(255, 255, 255, 255);
+
+    dl->AddRectFilled(trackMin, trackMax, colTrack, trackR);
+    if (ratio > 0.f) {
+        const float fillW = std::max(barH * 0.5f, barWidth * ratio);
+        dl->AddRectFilled(trackMin, ImVec2(trackMin.x + fillW, trackMax.y), colFill, trackR);
+        dl->AddCircleFilled(ImVec2(trackMin.x + fillW, trackMin.y + barH * 0.5f), scrubbing_ ? 7.0f : 5.0f, colKnob);
+    }
+
+    const double displayTime = scrubbing_ && duration > 0.05 ? static_cast<double>(scrubRatio_) * duration : mediaTime;
 
     char curBuf[32], durBuf[32];
-    formatTime(curBuf, sizeof(curBuf), mediaTime);
+    formatTime(curBuf, sizeof(curBuf), displayTime);
     if (duration > 0.05)
         formatTime(durBuf, sizeof(durBuf), duration);
     else
         std::snprintf(durBuf, sizeof(durBuf), "--:--");
 
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.88f, 1.f));
-    ImGui::Text("%s / %s", curBuf, durBuf);
+    ImGui::Text("%s / %s%s", curBuf, durBuf, scrubbing_ ? "  (预览)" : "");
     ImGui::PopStyleColor();
+
+    return displayTime;
 }
 
 void PlayerView::draw()
@@ -182,17 +185,25 @@ void PlayerView::draw()
     const float videoAreaH = std::max(0.f, availH - chromeH - pad);
 
     if (player_ && player_->isOpen() && present_) {
-        player_->markPlaybackStarted();
-        const double t = player_->mediaTimeSec();
+        if (!player_->isPaused())
+            player_->markPlaybackStarted();
+
+        const double clockT = player_->mediaTimeSec();
+        const double duration = player_->durationSec();
+
+        // Draw chrome first conceptually via layout: video then bar.
+        ImGui::BeginChild("##video", ImVec2(availW, videoAreaH), false,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+        // While scrubbing, freeze present clock to preview ratio (seek commits on release).
+        const double presentT = scrubbing_ && duration > 0.05 ? static_cast<double>(scrubRatio_) * duration : clockT;
         VideoFrame frame;
-        if (player_->takeFrameForTime(t, frame)) {
+        if (player_->takeFrameForTime(presentT, frame)) {
             lastFrame_ = std::move(frame);
             haveLast_ = true;
             present_->update(lastFrame_);
         }
 
-        ImGui::BeginChild("##video", ImVec2(availW, videoAreaH), false,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         if (present_->hasFrame()) {
             const float vw = static_cast<float>(present_->width());
             const float vh = static_cast<float>(present_->height());
@@ -217,7 +228,7 @@ void PlayerView::draw()
 
         ImGui::Dummy(ImVec2(0, 4));
         ImGui::Indent(pad);
-        drawProgressBar(std::max(0.f, availW - pad * 2.f), t, player_->durationSec());
+        drawProgressBar(std::max(0.f, availW - pad * 2.f), clockT, duration);
         ImGui::Dummy(ImVec2(0, 6));
         drawTransportControls();
         ImGui::Unindent(pad);
@@ -230,6 +241,7 @@ void PlayerView::draw()
             ImGui::Unindent(pad);
         }
     } else {
+        scrubbing_ = false;
         ImGui::TextUnformatted(status_.c_str());
     }
 

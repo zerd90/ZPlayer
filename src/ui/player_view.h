@@ -19,13 +19,9 @@ public:
     void setStatus(const std::string &status) { status_ = status; }
 
 private:
-    void drawProgressBar(float barWidth, double mediaTime, double duration);
+    /** Returns display media time (scrub preview overrides while dragging). */
+    double drawProgressBar(float barWidth, double mediaTime, double duration);
     void drawTransportControls();
-
-    // Step-3 UI stubs (wired to MediaPlayer in step 4).
-    void onTogglePauseStub();
-    void onSkipBackStub();
-    void onSkipForwardStub();
 
     MediaPlayer *player_ = nullptr;
     VideoPresent *present_ = nullptr;
@@ -33,8 +29,8 @@ private:
     bool haveLast_ = false;
     std::string status_ = "拖放媒体文件到窗口以播放";
 
-    /** Local chrome state until real pause is connected. */
-    bool uiPaused_ = false;
+    bool scrubbing_ = false;
+    float scrubRatio_ = 0.f;
 };
 
 } // namespace zplayer

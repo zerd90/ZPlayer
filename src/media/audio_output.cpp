@@ -28,16 +28,22 @@ bool AudioOutput::prepare(int sampleRate, int channels)
     std::lock_guard<std::mutex> lock(mutex_);
     sampleRate_ = sampleRate;
     channels_ = channels;
-    capacityFrames_ = static_cast<size_t>(sampleRate_) * 3; // ~3s while first video frames decode
+    capacityFrames_ = static_cast<size_t>(sampleRate_) * 3;
     ring_.assign(capacityFrames_ * static_cast<size_t>(channels_), 0.f);
     readPos_ = writePos_ = 0;
+    paused_ = false;
     return true;
 }
 
 bool AudioOutput::startDevice()
 {
-    if (device_)
+    if (device_) {
+        if (paused_) {
+            paused_ = false;
+            ma_device_start(device_);
+        }
         return true;
+    }
     if (sampleRate_ <= 0 || channels_ <= 0)
         return false;
 
@@ -61,6 +67,7 @@ bool AudioOutput::startDevice()
         device_ = nullptr;
         return false;
     }
+    paused_ = false;
     return true;
 }
 
@@ -70,6 +77,29 @@ bool AudioOutput::start(int sampleRate, int channels)
     if (!prepare(sampleRate, channels))
         return false;
     return startDevice();
+}
+
+void AudioOutput::setPaused(bool paused)
+{
+    if (!device_) {
+        paused_ = paused;
+        return;
+    }
+    if (paused == paused_)
+        return;
+    paused_ = paused;
+    if (paused)
+        ma_device_stop(device_);
+    else
+        ma_device_start(device_);
+}
+
+void AudioOutput::clearBuffer()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    readPos_ = writePos_ = 0;
+    if (!ring_.empty())
+        std::fill(ring_.begin(), ring_.end(), 0.f);
 }
 
 void AudioOutput::stop()
@@ -84,6 +114,7 @@ void AudioOutput::stop()
     readPos_ = writePos_ = capacityFrames_ = 0;
     sampleRate_ = 0;
     channels_ = 0;
+    paused_ = false;
 }
 
 void AudioOutput::write(const float *samples, size_t frameCount)
@@ -95,10 +126,8 @@ void AudioOutput::write(const float *samples, size_t frameCount)
     const size_t ch = static_cast<size_t>(channels_);
     for (size_t i = 0; i < frameCount; ++i) {
         size_t next = (writePos_ + 1) % capacityFrames_;
-        if (next == readPos_) {
-            // Overflow: drop one oldest frame
+        if (next == readPos_)
             readPos_ = (readPos_ + 1) % capacityFrames_;
-        }
         const float *src = samples + i * ch;
         float *dst = ring_.data() + writePos_ * ch;
         std::memcpy(dst, src, ch * sizeof(float));

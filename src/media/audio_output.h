@@ -27,6 +27,13 @@ public:
     void stop();
     bool isRunning() const { return device_ != nullptr; }
 
+    /** Soft pause/resume without tearing down the device. */
+    void setPaused(bool paused);
+    bool isPaused() const { return paused_; }
+
+    /** Drop all buffered PCM (used on seek). */
+    void clearBuffer();
+
     /** Push interleaved float samples. Works before or after startDevice(). */
     void write(const float *samples, size_t frameCount);
 
@@ -41,12 +48,13 @@ private:
     ma_device *device_ = nullptr;
     int sampleRate_ = 0;
     int channels_ = 0;
+    bool paused_ = false;
 
     mutable std::mutex mutex_;
     std::vector<float> ring_;
     size_t readPos_ = 0;
     size_t writePos_ = 0;
-    size_t capacityFrames_ = 0; // ring size in frames
+    size_t capacityFrames_ = 0;
 };
 
 } // namespace zplayer

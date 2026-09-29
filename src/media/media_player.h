@@ -16,11 +16,13 @@ namespace zplayer {
 /**
  * Demux + decode worker. Video frames → bounded queue; audio → AudioOutput.
  * Prefers platform hardware decode (VT / D3D11VA / VAAPI) with software fallback.
- * Master clock: wall time from first presented frame (UI drives present).
+ * Master clock respects pause / seek; UI drives present timing.
  */
 class MediaPlayer {
 public:
     static constexpr size_t kMaxVideoQueue = 12;
+    /** Default skip step for rewind / fast-forward buttons (seconds). */
+    static constexpr double kSkipStepSec = 10.0;
 
     MediaPlayer();
     ~MediaPlayer();
@@ -28,7 +30,6 @@ public:
     MediaPlayer(const MediaPlayer &) = delete;
     MediaPlayer &operator=(const MediaPlayer &) = delete;
 
-    /** Open path and start decode thread. Stops any previous session. */
     bool open(const std::string &path);
     void close();
 
@@ -39,30 +40,29 @@ public:
     int videoHeight() const { return videoHeight_.load(); }
     const std::string &path() const { return path_; }
 
-    /** True when VideoToolbox / D3D11VA / VAAPI path is active. */
     bool usingHardwareDecode() const { return usingHw_.load(); }
-    /** "hw:videotoolbox" / "hw:d3d11va" / "hw:vaapi" / "sw" */
     std::string decodeBackendName() const;
 
-    /** Container duration in seconds; 0 if unknown. */
     double durationSec() const { return durationSec_.load(); }
 
-    /**
-     * Pop/update the frame that should show at mediaTimeSec.
-     * Drops late frames; keeps last good frame if waiting for next.
-     * Returns true if out was filled (possibly same as previous).
-     */
     bool takeFrameForTime(double mediaTimeSec, VideoFrame &out);
-
-    /** Seconds since playback start (wall clock). Starts on first takeFrameForTime. */
     double mediaTimeSec() const;
-
     void markPlaybackStarted();
+
+    bool isPaused() const { return paused_.load(); }
+    void setPaused(bool paused);
+    void togglePause() { setPaused(!isPaused()); }
+
+    /** Absolute seek (seconds). Decode thread flushes codecs/queues/audio. */
+    void seek(double sec);
+    /** Relative skip (e.g. ±kSkipStepSec). */
+    void skip(double deltaSec);
 
 private:
     void decodeLoop();
     void clearQueues();
     void startClockIfNeeded();
+    void setMediaClockSec(double sec);
 
     std::string path_;
     std::atomic<bool> open_{false};
@@ -84,7 +84,17 @@ private:
 
     mutable std::mutex clockMutex_;
     bool clockStarted_ = false;
-    int64_t clockStartUs_ = 0;
+    int64_t clockAnchorUs_ = 0;
+    double mediaBaseSec_ = 0.0;
+    double pausedAtSec_ = 0.0;
+    std::atomic<bool> paused_{false};
+
+    std::mutex seekMutex_;
+    std::atomic<bool> seekPending_{false};
+    double seekTargetSec_ = 0.0;
+    std::atomic<bool> decodeOneAfterSeek_{false};
+    /** Drop decoded frames earlier than this until a frame near the seek lands. */
+    std::atomic<double> discardBeforeSec_{-1.0};
 };
 
 } // namespace zplayer
