@@ -4,8 +4,10 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/time.h>
 #include <libswresample/swresample.h>
@@ -36,6 +38,152 @@ double packetPtsSec(const AVFrame *frame, AVRational timeBase)
     return pts * av_q2d(timeBase);
 }
 
+AVHWDeviceType preferredHwDeviceType()
+{
+#if defined(__APPLE__)
+    return AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+#elif defined(_WIN32)
+    return AV_HWDEVICE_TYPE_D3D11VA;
+#elif defined(__linux__)
+    return AV_HWDEVICE_TYPE_VAAPI;
+#else
+    return AV_HWDEVICE_TYPE_NONE;
+#endif
+}
+
+const char *hwDeviceTypeName(AVHWDeviceType type)
+{
+    const char *n = av_hwdevice_get_type_name(type);
+    return n ? n : "unknown";
+}
+
+struct HwDecodeState {
+    AVBufferRef *deviceCtx = nullptr;
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+};
+
+enum AVPixelFormat getHwFormat(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
+{
+    auto *hw = static_cast<HwDecodeState *>(ctx->opaque);
+    if (!hw)
+        return AV_PIX_FMT_NONE;
+    for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == hw->hwPixFmt)
+            return *p;
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+bool findHwPixelFormat(const AVCodec *dec, AVHWDeviceType type, AVPixelFormat *outFmt)
+{
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(dec, i);
+        if (!cfg)
+            break;
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && cfg->device_type == type) {
+            *outFmt = cfg->pix_fmt;
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Try hardware path; on any failure leave ctx ready for soft open (caller opens). */
+bool tryInitHardware(AVCodecContext *ctx, const AVCodec *dec, HwDecodeState *hw, std::string *deviceName)
+{
+    const AVHWDeviceType type = preferredHwDeviceType();
+    if (type == AV_HWDEVICE_TYPE_NONE)
+        return false;
+
+    AVPixelFormat hwFmt = AV_PIX_FMT_NONE;
+    if (!findHwPixelFormat(dec, type, &hwFmt)) {
+        std::fprintf(stderr, "[ZPlayer] hw: no hw_config for %s on this codec; soft decode\n",
+                     hwDeviceTypeName(type));
+        return false;
+    }
+
+    AVBufferRef *device = nullptr;
+    if (av_hwdevice_ctx_create(&device, type, nullptr, nullptr, 0) < 0) {
+        std::fprintf(stderr, "[ZPlayer] hw: av_hwdevice_ctx_create(%s) failed; soft decode\n",
+                     hwDeviceTypeName(type));
+        return false;
+    }
+
+    hw->deviceCtx = device;
+    hw->hwPixFmt = hwFmt;
+    ctx->opaque = hw;
+    ctx->get_format = getHwFormat;
+    ctx->hw_device_ctx = av_buffer_ref(device);
+    if (!ctx->hw_device_ctx) {
+        av_buffer_unref(&hw->deviceCtx);
+        ctx->opaque = nullptr;
+        ctx->get_format = nullptr;
+        return false;
+    }
+
+    *deviceName = hwDeviceTypeName(type);
+    return true;
+}
+
+void clearHardware(AVCodecContext *ctx, HwDecodeState *hw)
+{
+    if (ctx) {
+        av_buffer_unref(&ctx->hw_device_ctx);
+        ctx->opaque = nullptr;
+        ctx->get_format = nullptr;
+    }
+    if (hw)
+        av_buffer_unref(&hw->deviceCtx);
+}
+
+bool frameToRgba(AVFrame *src, AVFrame *rgbaFrame, SwsContext **sws, VideoFrame &out, AVRational videoTb)
+{
+    // Hardware surfaces must be transferred to a software frame first.
+    AVFrame *swFrame = nullptr;
+    AVFrame *use = src;
+    bool transferred = false;
+
+    if (src->format == AV_PIX_FMT_VIDEOTOOLBOX || src->format == AV_PIX_FMT_D3D11 ||
+        src->format == AV_PIX_FMT_D3D11VA_VLD || src->format == AV_PIX_FMT_VAAPI ||
+        (src->hw_frames_ctx != nullptr)) {
+        swFrame = av_frame_alloc();
+        if (!swFrame)
+            return false;
+        if (av_hwframe_transfer_data(swFrame, src, 0) < 0) {
+            av_frame_free(&swFrame);
+            return false;
+        }
+        swFrame->best_effort_timestamp = src->best_effort_timestamp;
+        swFrame->pts = src->pts;
+        use = swFrame;
+        transferred = true;
+    }
+
+    *sws = sws_getCachedContext(*sws, use->width, use->height, static_cast<AVPixelFormat>(use->format),
+                                rgbaFrame->width, rgbaFrame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr,
+                                nullptr, nullptr);
+    if (!*sws) {
+        if (transferred)
+            av_frame_free(&swFrame);
+        return false;
+    }
+    sws_scale(*sws, use->data, use->linesize, 0, use->height, rgbaFrame->data, rgbaFrame->linesize);
+
+    out.width = rgbaFrame->width;
+    out.height = rgbaFrame->height;
+    out.ptsSec = packetPtsSec(src, videoTb);
+    const size_t rowBytes = static_cast<size_t>(out.width) * 4;
+    out.rgba.resize(rowBytes * static_cast<size_t>(out.height));
+    for (int y = 0; y < out.height; ++y) {
+        std::memcpy(out.rgba.data() + static_cast<size_t>(y) * rowBytes,
+                    rgbaFrame->data[0] + y * rgbaFrame->linesize[0], rowBytes);
+    }
+
+    if (transferred)
+        av_frame_free(&swFrame);
+    return true;
+}
+
 } // namespace
 
 MediaPlayer::MediaPlayer() = default;
@@ -43,6 +191,15 @@ MediaPlayer::MediaPlayer() = default;
 MediaPlayer::~MediaPlayer()
 {
     close();
+}
+
+std::string MediaPlayer::decodeBackendName() const
+{
+    if (!usingHw_.load())
+        return "sw";
+    if (!hwDeviceName_.empty())
+        return std::string("hw:") + hwDeviceName_;
+    return "hw";
 }
 
 void MediaPlayer::clearQueues()
@@ -62,8 +219,11 @@ bool MediaPlayer::open(const std::string &path)
     open_ = false;
     hasAudio_ = false;
     hasVideo_ = false;
+    usingHw_ = false;
+    hwDeviceName_.clear();
     videoWidth_ = 0;
     videoHeight_ = 0;
+    durationSec_ = 0.0;
     {
         std::lock_guard<std::mutex> lock(clockMutex_);
         clockStarted_ = false;
@@ -72,8 +232,6 @@ bool MediaPlayer::open(const std::string &path)
     clearQueues();
 
     decodeThread_ = std::thread(&MediaPlayer::decodeLoop, this);
-    // Wait briefly for open success/fail via open_ flag set in decodeLoop after format open.
-    // Decode loop sets open_ true once streams are ready; false + stop if fail.
     for (int i = 0; i < 200; ++i) {
         if (open_.load() || stop_.load())
             break;
@@ -93,6 +251,8 @@ void MediaPlayer::close()
     open_ = false;
     hasAudio_ = false;
     hasVideo_ = false;
+    usingHw_ = false;
+    hwDeviceName_.clear();
     {
         std::lock_guard<std::mutex> lock(clockMutex_);
         clockStarted_ = false;
@@ -134,15 +294,12 @@ bool MediaPlayer::takeFrameForTime(double mediaTimeSec, VideoFrame &out)
     if (videoQueue_.empty())
         return false;
 
-    // Drop frames that are clearly late (>1 frame worth behind).
     while (videoQueue_.size() > 1 && videoQueue_.front().ptsSec < mediaTimeSec - 0.05)
         videoQueue_.pop_front();
 
     const VideoFrame &front = videoQueue_.front();
-    if (front.ptsSec > mediaTimeSec + 0.001) {
-        // Too early — keep waiting; still provide last shown if we already have out.
+    if (front.ptsSec > mediaTimeSec + 0.001)
         return false;
-    }
 
     out = std::move(videoQueue_.front());
     videoQueue_.pop_front();
@@ -160,6 +317,7 @@ void MediaPlayer::decodeLoop()
     AVPacket *pkt = nullptr;
     AVFrame *frame = nullptr;
     AVFrame *rgbaFrame = nullptr;
+    HwDecodeState hw{};
 
     int videoStream = -1;
     int audioStream = -1;
@@ -183,6 +341,9 @@ void MediaPlayer::decodeLoop()
         goto cleanup;
     }
 
+    if (fmt->duration != AV_NOPTS_VALUE && fmt->duration > 0)
+        durationSec_ = static_cast<double>(fmt->duration) / static_cast<double>(AV_TIME_BASE);
+
     videoStream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     audioStream = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
 
@@ -198,14 +359,39 @@ void MediaPlayer::decodeLoop()
             fail("video codec context failed");
             goto cleanup;
         }
-        if (avcodec_open2(videoCtx, dec, nullptr) < 0) {
-            fail("avcodec_open2 video failed");
-            goto cleanup;
+
+        bool hwOk = tryInitHardware(videoCtx, dec, &hw, &hwDeviceName_);
+        if (hwOk) {
+            if (avcodec_open2(videoCtx, dec, nullptr) < 0) {
+                std::fprintf(stderr, "[ZPlayer] hw: avcodec_open2 failed; falling back to soft\n");
+                clearHardware(videoCtx, &hw);
+                hw = {};
+                hwDeviceName_.clear();
+                // Re-apply codecpar after clearing hw fields.
+                avcodec_free_context(&videoCtx);
+                videoCtx = avcodec_alloc_context3(dec);
+                if (!videoCtx || avcodec_parameters_to_context(videoCtx, st->codecpar) < 0 ||
+                    avcodec_open2(videoCtx, dec, nullptr) < 0) {
+                    fail("avcodec_open2 video failed (soft fallback)");
+                    goto cleanup;
+                }
+                hwOk = false;
+            }
+        } else {
+            if (avcodec_open2(videoCtx, dec, nullptr) < 0) {
+                fail("avcodec_open2 video failed");
+                goto cleanup;
+            }
         }
+
+        usingHw_ = hwOk;
         videoTb = st->time_base;
-        videoWidth_ = videoCtx->width;
-        videoHeight_ = videoCtx->height;
+        videoWidth_ = videoCtx->width > 0 ? videoCtx->width : st->codecpar->width;
+        videoHeight_ = videoCtx->height > 0 ? videoCtx->height : st->codecpar->height;
         hasVideo_ = true;
+
+        if (durationSec_.load() <= 0.0 && st->duration != AV_NOPTS_VALUE && st->duration > 0)
+            durationSec_ = st->duration * av_q2d(st->time_base);
 
         rgbaFrame = av_frame_alloc();
         if (!rgbaFrame) {
@@ -213,8 +399,8 @@ void MediaPlayer::decodeLoop()
             goto cleanup;
         }
         rgbaFrame->format = AV_PIX_FMT_RGBA;
-        rgbaFrame->width = videoCtx->width;
-        rgbaFrame->height = videoCtx->height;
+        rgbaFrame->width = videoWidth_.load();
+        rgbaFrame->height = videoHeight_.load();
         if (av_frame_get_buffer(rgbaFrame, 32) < 0) {
             fail("rgba buffer alloc failed");
             goto cleanup;
@@ -261,8 +447,9 @@ void MediaPlayer::decodeLoop()
     }
 
     open_ = true;
-    std::fprintf(stderr, "[ZPlayer] opened %s video=%dx%d audio=%s\n", path_.c_str(), videoWidth_.load(),
-                 videoHeight_.load(), hasAudio_.load() ? "yes" : "no");
+    std::fprintf(stderr, "[ZPlayer] opened %s video=%dx%d audio=%s decode=%s duration=%.3fs\n", path_.c_str(),
+                 videoWidth_.load(), videoHeight_.load(), hasAudio_.load() ? "yes" : "no",
+                 decodeBackendName().c_str(), durationSec_.load());
 
     while (!stop_.load()) {
         int ret = av_read_frame(fmt, pkt);
@@ -281,24 +468,25 @@ void MediaPlayer::decodeLoop()
                 if (ret < 0)
                     break;
 
-                sws = sws_getCachedContext(sws, frame->width, frame->height, (AVPixelFormat)frame->format,
-                                           rgbaFrame->width, rgbaFrame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr,
-                                           nullptr, nullptr);
-                if (!sws) {
-                    av_frame_unref(frame);
-                    continue;
+                // Late size discovery after first hw frame.
+                if (frame->width > 0 && frame->height > 0 &&
+                    (rgbaFrame->width != frame->width || rgbaFrame->height != frame->height)) {
+                    av_frame_unref(rgbaFrame);
+                    rgbaFrame->format = AV_PIX_FMT_RGBA;
+                    rgbaFrame->width = frame->width;
+                    rgbaFrame->height = frame->height;
+                    if (av_frame_get_buffer(rgbaFrame, 32) < 0) {
+                        av_frame_unref(frame);
+                        break;
+                    }
+                    videoWidth_ = frame->width;
+                    videoHeight_ = frame->height;
                 }
-                sws_scale(sws, frame->data, frame->linesize, 0, frame->height, rgbaFrame->data, rgbaFrame->linesize);
 
                 VideoFrame vf;
-                vf.width = rgbaFrame->width;
-                vf.height = rgbaFrame->height;
-                vf.ptsSec = packetPtsSec(frame, videoTb);
-                const size_t rowBytes = static_cast<size_t>(vf.width) * 4;
-                vf.rgba.resize(rowBytes * static_cast<size_t>(vf.height));
-                for (int y = 0; y < vf.height; ++y) {
-                    std::memcpy(vf.rgba.data() + static_cast<size_t>(y) * rowBytes, rgbaFrame->data[0] + y * rgbaFrame->linesize[0],
-                                rowBytes);
+                if (!frameToRgba(frame, rgbaFrame, &sws, vf, videoTb)) {
+                    av_frame_unref(frame);
+                    continue;
                 }
 
                 {
@@ -338,27 +526,14 @@ void MediaPlayer::decodeLoop()
         av_packet_unref(pkt);
     }
 
-    // Flush video decoder
     if (videoCtx && !stop_.load()) {
         avcodec_send_packet(videoCtx, nullptr);
         while (!stop_.load()) {
             int ret = avcodec_receive_frame(videoCtx, frame);
             if (ret < 0)
                 break;
-            sws = sws_getCachedContext(sws, frame->width, frame->height, (AVPixelFormat)frame->format, rgbaFrame->width,
-                                       rgbaFrame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (sws) {
-                sws_scale(sws, frame->data, frame->linesize, 0, frame->height, rgbaFrame->data, rgbaFrame->linesize);
-                VideoFrame vf;
-                vf.width = rgbaFrame->width;
-                vf.height = rgbaFrame->height;
-                vf.ptsSec = packetPtsSec(frame, videoTb);
-                const size_t rowBytes = static_cast<size_t>(vf.width) * 4;
-                vf.rgba.resize(rowBytes * static_cast<size_t>(vf.height));
-                for (int y = 0; y < vf.height; ++y) {
-                    std::memcpy(vf.rgba.data() + static_cast<size_t>(y) * rowBytes, rgbaFrame->data[0] + y * rgbaFrame->linesize[0],
-                                rowBytes);
-                }
+            VideoFrame vf;
+            if (frameToRgba(frame, rgbaFrame, &sws, vf, videoTb)) {
                 std::unique_lock<std::mutex> lock(videoMutex_);
                 videoCv_.wait(lock, [&] { return stop_.load() || videoQueue_.size() < kMaxVideoQueue; });
                 if (!stop_.load())
@@ -377,11 +552,12 @@ cleanup:
     av_frame_free(&rgbaFrame);
     av_frame_free(&frame);
     av_packet_free(&pkt);
+    if (videoCtx)
+        clearHardware(videoCtx, &hw);
     avcodec_free_context(&audioCtx);
     avcodec_free_context(&videoCtx);
     if (fmt)
         avformat_close_input(&fmt);
-    // Keep open_=true until close() so UI can drain remaining frames after EOF.
     if (!hasVideo_.load())
         open_ = false;
 }

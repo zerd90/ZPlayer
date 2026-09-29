@@ -37,8 +37,10 @@ make distclean >/dev/null 2>&1 || true
 
 # MVP libs: avformat / avcodec / avutil / swscale / swresample.
 # Disable large unused components; keep decoder/demuxer matrix intact.
-# No --enable-gpl / --enable-nonfree → LGPL. Autodetect may pick up system
-# iconv/zlib/bzlib (and optional Apple frameworks); that does not flip GPL.
+# No --enable-gpl / --enable-nonfree → LGPL. Autodetect picks up system
+# iconv/zlib/bzlib and Apple VideoToolbox (CONFIG_VIDEOTOOLBOX=1) for hwaccel;
+# that does not flip GPL. ZPlayer prefers VT hw decode with soft fallback.
+# Explicit --enable-videotoolbox is not required on Apple when frameworks exist.
 ./configure \
   --prefix="${PREFIX}" \
   --enable-static \

@@ -60,7 +60,10 @@ void ZPlayerMainWindow::openPath(const std::string &path)
         addLog("Open failed: " + path);
         return;
     }
-    view_.setStatus(path);
+    const std::string backend = player_.decodeBackendName();
+    view_.setStatus(path + "  [" + backend + "]");
+    addLog("Open ok decode=" + backend +
+           (player_.usingHardwareDecode() ? " (hardware)" : " (software)"));
 }
 
 void ZPlayerMainWindow::transferCmdArgs(std::vector<std::string> &args)

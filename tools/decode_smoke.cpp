@@ -18,8 +18,9 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "open failed: %s\n", path.c_str());
         return 1;
     }
-    std::fprintf(stderr, "open ok video=%dx%d audio=%d\n", player.videoWidth(), player.videoHeight(),
-                 player.hasAudio() ? 1 : 0);
+    std::fprintf(stderr, "open ok video=%dx%d audio=%d decode=%s hw=%d duration=%.3f\n", player.videoWidth(),
+                 player.videoHeight(), player.hasAudio() ? 1 : 0, player.decodeBackendName().c_str(),
+                 player.usingHardwareDecode() ? 1 : 0, player.durationSec());
 
     int got = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
