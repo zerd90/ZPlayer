@@ -22,7 +22,110 @@ void formatTime(char *buf, size_t n, double sec)
         std::snprintf(buf, n, "%d:%02d", m, s);
 }
 
+/** Hit-tested icon button drawn with ImDrawList geometry (no text glyph buttons). */
+bool transportIconButton(const char *id, float size, bool *hoveredOut = nullptr)
+{
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    if (hoveredOut)
+        *hoveredOut = hovered;
+
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const ImU32 bg = active    ? IM_COL32(255, 255, 255, 55)
+                     : hovered ? IM_COL32(255, 255, 255, 35)
+                               : IM_COL32(255, 255, 255, 18);
+    dl->AddCircleFilled(ImVec2(pos.x + size * 0.5f, pos.y + size * 0.5f), size * 0.5f, bg);
+    return pressed;
+}
+
+void drawSkipBackIcon(ImVec2 c, float r, ImU32 col)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    // Double chevron left + bar.
+    const float x0 = c.x - r * 0.55f;
+    const float y0 = c.y - r * 0.45f;
+    const float y1 = c.y + r * 0.45f;
+    dl->AddTriangleFilled(ImVec2(c.x + r * 0.05f, y0), ImVec2(c.x + r * 0.05f, y1), ImVec2(c.x - r * 0.45f, c.y), col);
+    dl->AddTriangleFilled(ImVec2(c.x + r * 0.55f, y0), ImVec2(c.x + r * 0.55f, y1), ImVec2(c.x + r * 0.05f, c.y), col);
+    dl->AddRectFilled(ImVec2(x0 - r * 0.12f, y0), ImVec2(x0, y1), col, 1.0f);
+}
+
+void drawSkipForwardIcon(ImVec2 c, float r, ImU32 col)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const float x1 = c.x + r * 0.55f;
+    const float y0 = c.y - r * 0.45f;
+    const float y1 = c.y + r * 0.45f;
+    dl->AddTriangleFilled(ImVec2(c.x - r * 0.05f, y0), ImVec2(c.x - r * 0.05f, y1), ImVec2(c.x + r * 0.45f, c.y), col);
+    dl->AddTriangleFilled(ImVec2(c.x - r * 0.55f, y0), ImVec2(c.x - r * 0.55f, y1), ImVec2(c.x - r * 0.05f, c.y), col);
+    dl->AddRectFilled(ImVec2(x1, y0), ImVec2(x1 + r * 0.12f, y1), col, 1.0f);
+}
+
+void drawPlayIcon(ImVec2 c, float r, ImU32 col)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddTriangleFilled(ImVec2(c.x - r * 0.28f, c.y - r * 0.45f), ImVec2(c.x - r * 0.28f, c.y + r * 0.45f),
+                          ImVec2(c.x + r * 0.48f, c.y), col);
+}
+
+void drawPauseIcon(ImVec2 c, float r, ImU32 col)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const float w = r * 0.18f;
+    const float h = r * 0.45f;
+    const float gap = r * 0.18f;
+    dl->AddRectFilled(ImVec2(c.x - gap - w, c.y - h), ImVec2(c.x - gap, c.y + h), col, 1.5f);
+    dl->AddRectFilled(ImVec2(c.x + gap, c.y - h), ImVec2(c.x + gap + w, c.y + h), col, 1.5f);
+}
+
 } // namespace
+
+void PlayerView::onTogglePauseStub()
+{
+    uiPaused_ = !uiPaused_;
+}
+
+void PlayerView::onSkipBackStub()
+{
+    // Step 3: visual stub only; seek wired in step 4.
+}
+
+void PlayerView::onSkipForwardStub()
+{
+    // Step 3: visual stub only; seek wired in step 4.
+}
+
+void PlayerView::drawTransportControls()
+{
+    const float btn = 36.0f;
+    const float gap = 14.0f;
+    const float rowW = btn * 3.f + gap * 2.f;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (avail - rowW) * 0.5f));
+
+    const ImU32 iconCol = IM_COL32(240, 240, 245, 255);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    if (transportIconButton("##rew", btn))
+        onSkipBackStub();
+    drawSkipBackIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
+
+    ImGui::SameLine(0, gap);
+    p = ImGui::GetCursorScreenPos();
+    if (transportIconButton("##playpause", btn))
+        onTogglePauseStub();
+    if (uiPaused_)
+        drawPlayIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
+    else
+        drawPauseIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
+
+    ImGui::SameLine(0, gap);
+    p = ImGui::GetCursorScreenPos();
+    if (transportIconButton("##ff", btn))
+        onSkipForwardStub();
+    drawSkipForwardIcon(ImVec2(p.x + btn * 0.5f, p.y + btn * 0.5f), btn * 0.42f, iconCol);
+}
 
 void PlayerView::drawProgressBar(float barWidth, double mediaTime, double duration)
 {
@@ -49,7 +152,6 @@ void PlayerView::drawProgressBar(float barWidth, double mediaTime, double durati
         dl->AddCircleFilled(ImVec2(knobX, trackMin.y + barH * 0.5f), 5.0f, colKnob);
     }
 
-    // Reserve layout space (non-interactive in step 2 — no seek).
     ImGui::InvisibleButton("##progress", ImVec2(barWidth, barH + 4.0f));
 
     char curBuf[32], durBuf[32];
@@ -73,7 +175,7 @@ void PlayerView::draw()
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
     ImGui::Begin("##ZPlayerVideo", nullptr, flags);
 
-    const float chromeH = 48.0f;
+    const float chromeH = 96.0f;
     const float pad = 12.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
     const float availH = ImGui::GetContentRegionAvail().y;
@@ -116,6 +218,8 @@ void PlayerView::draw()
         ImGui::Dummy(ImVec2(0, 4));
         ImGui::Indent(pad);
         drawProgressBar(std::max(0.f, availW - pad * 2.f), t, player_->durationSec());
+        ImGui::Dummy(ImVec2(0, 6));
+        drawTransportControls();
         ImGui::Unindent(pad);
 
         if (!status_.empty()) {
