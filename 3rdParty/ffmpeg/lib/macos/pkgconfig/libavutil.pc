@@ -1,0 +1,14 @@
+prefix=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos
+exec_prefix=${prefix}
+libdir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/lib
+includedir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.1.102
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm -lz -framework VideoToolbox -pthread -L/opt/homebrew/Cellar/libx11/1.8.13/lib -lX11 -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework CoreServices
+Libs.private: 
+Cflags: -I${includedir}

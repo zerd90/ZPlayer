@@ -1,0 +1,14 @@
+prefix=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos
+exec_prefix=${prefix}
+libdir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/lib
+includedir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/include
+
+Name: libswscale
+Description: FFmpeg image rescaling library
+Version: 10.1.102
+Requires: libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswscale -lm
+Libs.private: 
+Cflags: -I${includedir}

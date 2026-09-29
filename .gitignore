@@ -15,6 +15,10 @@
 *.so
 *.dylib
 *.dll
+# Keep vendored FFmpeg prebuilt libraries in the repository.
+!3rdParty/ffmpeg/lib/**/*.so
+!3rdParty/ffmpeg/lib/**/*.dylib
+!3rdParty/ffmpeg/lib/**/*.dll
 
 # Fortran module files
 *.mod
@@ -25,6 +29,12 @@
 *.la
 *.a
 *.lib
+!3rdParty/ffmpeg/lib/**/*.a
+!3rdParty/ffmpeg/lib/**/*.lib
+
+# FFmpeg local build scratch (source clone / install prefix / downloads)
+3rdParty/ffmpeg/.build-src/
+3rdParty/ffmpeg/.build-prefix-macos/
 
 # Executables
 *.exe

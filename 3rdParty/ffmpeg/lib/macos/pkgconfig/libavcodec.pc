@@ -1,0 +1,14 @@
+prefix=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos
+exec_prefix=${prefix}
+libdir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/lib
+includedir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/include
+
+Name: libavcodec
+Description: FFmpeg codec library
+Version: 63.1.102
+Requires: libswresample >= 7.1.102, libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavcodec -liconv -lm -framework AudioToolbox -pthread -lz -framework VideoToolbox -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework CoreServices
+Libs.private: 
+Cflags: -I${includedir}

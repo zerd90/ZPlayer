@@ -1,0 +1,8 @@
+version=9.0.2
+tag=n9.0.2
+commit=946fcce07b6dcd0331c8cc609192aeff5e1924f8
+arch=arm64
+type=static
+license=LGPL (no --enable-gpl)
+date=2026-09-29T04:20:26Z
+configure=static; MVP libs; --disable-avdevice/avfilter/network/programs/doc; no --enable-gpl

@@ -1,0 +1,14 @@
+prefix=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos
+exec_prefix=${prefix}
+libdir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/lib
+includedir=/Volumes/PS1008/Codes/ZPlayer/3rdParty/ffmpeg/.build-prefix-macos/include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 7.1.102
+Requires: libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswresample -lm
+Libs.private: 
+Cflags: -I${includedir}

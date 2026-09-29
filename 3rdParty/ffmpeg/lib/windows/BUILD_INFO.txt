@@ -1,0 +1,6 @@
+version=9.0.2
+type=shared (DLL + import .lib)
+source=https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build-shared.zip
+package=ffmpeg-9.0.2-full_build-shared (GyanD / gyan.dev)
+license=GPL (gyan full shared builds are GPLv3; see package LICENSE)
+date=2026-09-29T04:17:13Z
